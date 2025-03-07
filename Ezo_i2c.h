@@ -25,10 +25,10 @@ SOFTWARE
 #ifndef EZO_I2C_H
 #define EZO_I2C_H
 
-#include "Arduino.h"
-
-#include <Wire.h>
-
+#include "driver/i2c_master.h"
+#include "esp_err.h"
+#include "esp_log.h"
+#include "string.h"
 
 
 class Ezo_board{
@@ -41,9 +41,12 @@ class Ezo_board{
 	Ezo_board(uint8_t address);	 //Takes I2C address of the device
 	Ezo_board(uint8_t address, const char* name); //Takes I2C address of the device
 												//as well a name of your choice
-	Ezo_board(uint8_t address, TwoWire* wire); //Takes I2C address and TwoWire interface
-	Ezo_board(uint8_t address, const char* name, TwoWire* wire); //Takes all 3 parameters
+	Ezo_board(uint8_t address, i2c_master_bus_handle_t bus_handle); 
+	Ezo_board(uint8_t address, const char* name, i2c_master_bus_handle_t bus_handle);
 	
+	// Initialize the device on the I2C bus
+    esp_err_t init();
+
 	void send_cmd(const char* command);	
 	//send any command in a string, see the devices datasheet for available i2c commands
 	
@@ -104,7 +107,10 @@ class Ezo_board{
 	bool issued_read = false;
 	enum errors error;	
 	const static uint8_t bufferlen = 32;
-	TwoWire* wire = &Wire;
+	// ESP-IDF v5 I2C handles
+    i2c_master_bus_handle_t bus_handle = nullptr;
+    i2c_master_dev_handle_t dev_handle = nullptr;
+    bool device_initialized = false;
 };
 
 

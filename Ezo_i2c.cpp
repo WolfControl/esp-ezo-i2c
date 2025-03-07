@@ -1,8 +1,8 @@
 
 #include "Ezo_i2c.h"
-#include "Arduino.h"
-#include "Wire.h"
 #include <stdlib.h>
+
+static const char *TAG = "EZO_I2C";
 
 Ezo_board::Ezo_board(uint8_t address){
 	this->i2c_address = address;
@@ -13,12 +13,41 @@ Ezo_board::Ezo_board(uint8_t address, const char* name){
 	this->name = name;
 }
 
-Ezo_board::Ezo_board(uint8_t address, TwoWire* wire) : Ezo_board(address){
-  this->wire = wire;
+Ezo_board::Ezo_board(uint8_t address, i2c_master_bus_handle_t bus_handle) : Ezo_board(address) {
+  this->bus_handle = bus_handle;
 }
 
-Ezo_board::Ezo_board(uint8_t address, const char* name, TwoWire* wire) : Ezo_board(address, name){
-  this->wire = wire;
+Ezo_board::Ezo_board(uint8_t address, const char* name, i2c_master_bus_handle_t bus_handle) : Ezo_board(address, name) {
+  this->bus_handle = bus_handle;
+}
+
+esp_err_t Ezo_board::init() {
+  if (this->bus_handle == nullptr) {
+      ESP_LOGE(TAG, "I2C bus handle is null, can't initialize device");
+      return ESP_ERR_INVALID_ARG;
+  }
+  
+  if (this->device_initialized) {
+      ESP_LOGI(TAG, "Device already initialized");
+      return ESP_OK;
+  }
+  
+  // Configure the device
+  i2c_device_config_t dev_cfg = {
+      .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+      .device_address = this->i2c_address,
+      .scl_speed_hz = 100000, // 100KHz is standard for most EZO sensors
+  };
+  
+  // Add the device to the bus
+  esp_err_t ret = i2c_master_bus_add_device(this->bus_handle, &dev_cfg, &this->dev_handle);
+  if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to add device to I2C bus: %s", esp_err_to_name(ret));
+      return ret;
+  }
+  
+  this->device_initialized = true;
+  return ESP_OK;
 }
 
 const char* Ezo_board::get_name(){
@@ -38,13 +67,21 @@ void Ezo_board::set_address(uint8_t address){
 }
 
 void Ezo_board::send_cmd(const char* command) {
-  Wire.beginTransmission(this->i2c_address);
-  #ifdef ESP32
-  Wire.write((const uint8_t*)command, strlen(command)); 
-  #else
-  Wire.write(command); 
-  #endif
-  Wire.endTransmission();
+  if (!this->device_initialized) {
+      ESP_LOGE(TAG, "Device not initialized, can't send command");
+      return;
+  }
+  
+  size_t cmd_len = strlen(command);
+  esp_err_t ret;
+  
+  // Use i2c_master_transmit for IDFv5
+  ret = i2c_master_transmit(this->dev_handle, (const uint8_t*)command, cmd_len, -1);
+  
+  if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Error sending command: %s", esp_err_to_name(ret));
+  }
+  
   this->issued_read = false;
 }
 
@@ -53,10 +90,22 @@ void Ezo_board::send_read_cmd(){
 	this->issued_read = true;
 }
 
-void Ezo_board::send_cmd_with_num(const char* cmd, float num, uint8_t decimal_amount){
-	String temp = String(cmd )+ String(num, (unsigned int)decimal_amount);
-	const char* pointer = temp.c_str();
-	send_cmd(pointer);
+void Ezo_board::send_cmd_with_num(const char* cmd, float num, uint8_t decimal_amount) {
+  char buffer[32];
+  char format[10];
+  
+  // Create format string based on decimal_amount (e.g., "%.3f")
+  snprintf(format, sizeof(format), "%%.%df", decimal_amount);
+  
+  // Format the command with the number
+  snprintf(buffer, sizeof(buffer), "%s", cmd);
+  
+  // Append the formatted number
+  char num_str[16];
+  snprintf(num_str, sizeof(num_str), format, num);
+  strncat(buffer, num_str, sizeof(buffer) - strlen(buffer) - 1);
+  
+  send_cmd(buffer);
 }
 
 void Ezo_board::send_read_with_temp_comp(float temperature){
@@ -93,48 +142,57 @@ enum Ezo_board::errors Ezo_board::get_error(){
 	return this->error;
 }
 
-enum Ezo_board::errors Ezo_board::receive_cmd( char * sensordata_buffer, uint8_t buffer_len) {
-  byte sensor_bytes_received = 0;
-  byte code = 0;
-  byte in_char = 0;
-
-  memset(sensordata_buffer, 0, buffer_len);        // clear sensordata array;
-
-  wire->requestFrom(this->i2c_address, (uint8_t)(buffer_len-1), (uint8_t)1);
-  code = wire->read();
-
-  //wire->beginTransmission(this->i2c_address);
-  while (wire->available()) {
-    in_char = wire->read();
-
-    if (in_char == 0) {
-      //wire->endTransmission();
-      break;
-    }
-    else {
-      sensordata_buffer[sensor_bytes_received] = in_char;
-      sensor_bytes_received++;
-    }
+enum Ezo_board::errors Ezo_board::receive_cmd(char* sensordata_buffer, uint8_t buffer_len) {
+  if (!this->device_initialized) {
+      ESP_LOGE(TAG, "Device not initialized, can't receive command");
+      this->error = FAIL;
+      return this->error;
   }
   
-  //should last array point be set to 0 to stop string overflows?
+  // Buffer to hold the raw response (status code + data)
+  uint8_t read_buffer[buffer_len + 1]; // +1 for status code
+  memset(read_buffer, 0, buffer_len + 1);
+  
+  // Clear the output buffer
+  memset(sensordata_buffer, 0, buffer_len);
+  
+  // Read data from the device
+  esp_err_t ret = i2c_master_receive(this->dev_handle, read_buffer, buffer_len, -1);
+  
+  if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Error receiving data: %s", esp_err_to_name(ret));
+      this->error = FAIL;
+      return this->error;
+  }
+  
+  // The first byte is the status code
+  uint8_t code = read_buffer[0];
+  
+  // Copy the data (excluding status code) to the output buffer
+  uint8_t sensor_bytes_received = 0;
+  for (int i = 1; i < buffer_len + 1 && read_buffer[i] != 0; i++) {
+      sensordata_buffer[sensor_bytes_received++] = read_buffer[i];
+  }
+  
+  // Parse status code
   switch (code) {
-    case 1:
-	  this->error = SUCCESS;
-      break;
-
-    case 2:
-	  this->error = FAIL;
-      break;
-
-    case 254:
-	  this->error = NOT_READY;
-      break;
-
-    case 255:
-	  this->error = NO_DATA;
-	  break;
+      case 1:
+          this->error = SUCCESS;
+          break;
+      case 2:
+          this->error = FAIL;
+          break;
+      case 254:
+          this->error = NOT_READY;
+          break;
+      case 255:
+          this->error = NO_DATA;
+          break;
+      default:
+          ESP_LOGW(TAG, "Unknown status code: %d", code);
+          this->error = FAIL;
+          break;
   }
-  return this->error;
   
+  return this->error;
 }
