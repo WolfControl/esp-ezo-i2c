@@ -100,6 +100,9 @@ class Ezo_board{
     void set_address(uint8_t address);
     //lets you change the I2C address of the device
 	
+	void set_bus_handle(i2c_master_bus_handle_t new_handle);
+	//sets the I2C bus handle for the device
+
 	protected:
 	uint8_t i2c_address;
 	const char* name = 0;

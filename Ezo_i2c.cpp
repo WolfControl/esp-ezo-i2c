@@ -66,6 +66,11 @@ void Ezo_board::set_address(uint8_t address){
     this->i2c_address = address;
 }
 
+
+void Ezo_board::set_bus_handle(i2c_master_bus_handle_t new_handle) {
+    this->bus_handle = new_handle;
+}
+
 void Ezo_board::send_cmd(const char* command) {
   if (!this->device_initialized) {
       ESP_LOGE(TAG, "Device not initialized, can't send command");
