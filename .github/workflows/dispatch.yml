@@ -1,0 +1,23 @@
+name: Dispatch Firmware Releases
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: ['WolfControl/sensor_water']
+    steps:
+      - name: Repository Dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CICD_KEY }}
+          repository: ${{ matrix.repo }}
+          event-type: 'esp-library-release'
+          client-payload: '{
+            "version": "${{ github.event.release.tag_name }}",
+            "library": "${{ github.event.repository.name }}"
+            }'
